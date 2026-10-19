@@ -9,6 +9,8 @@ College students and IT folks in India park their scooters, bikes and cars at 9 
 3. **Gemma 3** (open-weight, running on the owner's own laptop through Ollama) compares each pair and lists only the *new* damage, with a verdict and confidence.
 4. Both people save the report as a PDF. That's the whole dispute process.
 
+When listing a vehicle, **✨ Ask Gemma for a fair price** suggests an hourly rate and a range, with a short reason.
+
 Live app: https://raga-v.github.io/idlewheels/ (the AI part needs Ollama on your laptop, see below)
 
 ## Run the AI locally
@@ -16,6 +18,7 @@ Live app: https://raga-v.github.io/idlewheels/ (the AI part needs Ollama on your
 ```bash
 ollama pull gemma3:4b
 # Windows:  setx OLLAMA_ORIGINS "*"   then restart Ollama from the tray
+#   (safer: list only the sites you use, e.g. "https://raga-v.github.io,https://idlewheels.onrender.com")
 # Mac/Linux: OLLAMA_ORIGINS="*" ollama serve
 ```
 
