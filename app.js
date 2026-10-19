@@ -17,7 +17,8 @@ const HINTS = {
 let settings = { url: 'http://localhost:11434', model: 'gemma3:4b', ...load('iw-settings', {}) };
 // The GitHub Pages copy has no server of its own, so it talks to the one on Render.
 const API = location.hostname.endsWith('github.io') ? 'https://idlewheels.onrender.com' : '';
-let me = load('iw-me', null);        // { id, name, phone, key } once this browser has introduced itself
+let me = load('iw-session', null);   // { token, id, name, phone } while logged in
+let listingPhoto = null;             // data URL of the photo picked in the listing form
 let listings = [];
 // angle -> dataURL (downscaled), one set per booking. Kept in the browser so a reload between pickup and return loses nothing.
 let shotsKey = 'iw-shots-free';
@@ -278,25 +279,26 @@ function downscale(file, max = 768) {
 async function api(path, { method = 'GET', body } = {}) {
   const r = await fetch(`${API}/api${path}`, {
     method,
-    headers: { 'content-type': 'application/json', ...(me ? { 'x-user-key': me.key } : {}) },
+    headers: { 'content-type': 'application/json', ...(me ? { authorization: `Bearer ${me.token}` } : {}) },
     body: body && JSON.stringify(body),
   });
   const data = await r.json().catch(() => ({}));
-  if (r.status === 401 && me) { me = null; save('iw-me', null); }
+  if (r.status === 401 && me && !path.startsWith('/auth')) { me = null; save('iw-session', null); renderAccount(); }
   if (!r.ok) throw new Error(data.error || `The server said ${r.status}`);
   return data;
 }
 
 // A modal form. Resolves with the form's fields, or null if closed.
-function sheet(inner, submit, setup) {
+function sheet(inner, submit, setup, cancel = 'Cancel') {
   return new Promise((resolve) => {
     const d = document.createElement('dialog');
     d.className = 'sheet';
     d.innerHTML = `<form method="dialog">${inner}
-      <div class="row end"><button class="btn ghost" value="cancel" formnovalidate>Cancel</button><button class="btn" value="ok">${submit}</button></div></form>`;
+      <div class="row end"><button class="btn ghost" value="cancel" formnovalidate>${cancel}</button><button class="btn" value="ok">${submit}</button></div></form>`;
     document.body.append(d);
     d.addEventListener('close', () => {
-      const data = d.returnValue === 'ok' ? Object.fromEntries(new FormData(d.querySelector('form'))) : null;
+      const data = d.returnValue === 'ok' ? Object.fromEntries(new FormData(d.querySelector('form')))
+        : d.returnValue === 'alt' ? { _alt: true } : null;
       d.remove();
       resolve(data);
     });
@@ -314,19 +316,66 @@ function toast(msg, mood = 'happy') {
   setTimeout(() => t.remove(), 3700);
 }
 
-async function ensureMe() {
+// Sign up or log in. Resolves with the logged-in user, or null if the person closes the form.
+async function ensureMe(mode = 'signup') {
   if (me) return me;
-  const f = await sheet(`
-    <span class="eyebrow">${icon('user')} Quick intro</span>
-    <h2>Hi! Who are you?</h2>
-    <p class="muted small">Your name is shown on your listings and requests. Your phone number is only shared with the other person after a booking is accepted.</p>
-    <div class="field"><label for="nm">Your name</label><input id="nm" name="name" required maxlength="40" placeholder="Raga" autocomplete="given-name"></div>
-    <div class="field"><label for="ph">Phone</label><input id="ph" name="phone" required inputmode="tel" pattern="[+0-9 ]{10,16}" placeholder="98765 43210" autocomplete="tel"></div>`, 'Continue');
-  if (!f) return null;
-  me = await api('/users', { method: 'POST', body: f });
-  save('iw-me', me);
-  return me;
+  let err = '', phone = '';
+  for (;;) {
+    const signup = mode === 'signup';
+    const f = await sheet(`
+      <span class="eyebrow">${icon('user')} ${signup ? 'New here?' : 'Welcome back'}</span>
+      <h2>${signup ? 'Create your account' : 'Log in'}</h2>
+      <p class="muted small">${signup ? 'Your name is shown on your listings and requests. Your phone number is only shared after a booking is accepted.' : 'Use the phone number and password you signed up with, on any device.'}</p>
+      ${err ? `<p class="form-err">${icon('alert', 'xs')} ${esc(err)}</p>` : ''}
+      ${signup ? `<div class="field"><label for="nm">Your name</label><input id="nm" name="name" required maxlength="40" placeholder="Raga" autocomplete="name"></div>` : ''}
+      <div class="field"><label for="ph">Phone number</label><input id="ph" name="phone" required inputmode="tel" pattern="[+0-9 ]{10,16}" placeholder="98765 43210" autocomplete="tel" value="${esc(phone)}"></div>
+      <div class="field"><label for="pw">Password</label><input id="pw" name="password" type="password" required minlength="${signup ? 6 : 1}" maxlength="200" autocomplete="${signup ? 'new-password' : 'current-password'}" placeholder="${signup ? 'At least 6 characters' : ''}"></div>
+      <p class="small muted switch">${signup ? 'Already have an account?' : 'New to IdleWheels?'} <button class="linkish" value="alt" formnovalidate>${signup ? 'Log in' : 'Create an account'}</button></p>`,
+    signup ? `${icon('check')} Create account` : `${icon('arrow')} Log in`);
+    if (!f) return null;
+    if (f._alt) { mode = signup ? 'login' : 'signup'; err = ''; continue; }
+    try {
+      const s = await api(signup ? '/auth/signup' : '/auth/login', { method: 'POST', body: f });
+      me = { token: s.token, ...s.user };
+      save('iw-session', me);
+      renderAccount(); refreshBadge();
+      toast(signup ? `Welcome, ${me.name}!` : `Welcome back, ${me.name}!`, 'joy');
+      return me;
+    } catch (e) {
+      err = e.message; phone = f.phone;
+      if (/already has an account/.test(err)) mode = 'login';
+    }
+  }
 }
+
+const initial = (n) => esc(n.trim()[0]?.toUpperCase() || '?');
+function renderAccount() {
+  const a = $('#acct');
+  a.classList.toggle('in', !!me);
+  a.innerHTML = me ? `<span class="avatar">${initial(me.name)}</span><span class="acct-name">${esc(me.name)}</span>` : `${icon('user')}<span class="acct-name">Log in</span>`;
+  a.setAttribute('aria-label', me ? `Account: ${me.name}` : 'Log in or sign up');
+}
+
+$('#acct').onclick = async () => {
+  if (!me) {
+    try { if (await ensureMe('login')) render(); } catch (e) { toast(e.message, 'worried'); }
+    return;
+  }
+  const out = await sheet(`
+    <div class="acct-card"><span class="avatar big">${initial(me.name)}</span>
+      <div><h2>${esc(me.name)}</h2><p class="muted">${esc(me.phone)}</p></div></div>
+    <p class="muted small">You're logged in on this device. Log in with the same phone number and password on any other phone or laptop to see your listings, bookings and chats there.</p>`,
+  `${icon('back')} Log out`, null, 'Close');
+  if (!out) return;
+  try { await api('/auth/logout', { method: 'POST' }); } catch {}
+  me = null; save('iw-session', null);
+  renderAccount();
+  $('#nav-badge').hidden = true;
+  toast('Logged out. See you soon!');
+  if (current === 'home') render(); else location.hash = 'home';
+};
+
+const photoSrc = (u) => (u?.startsWith('/api') ? API + u : u || '');
 
 const waking = (what) => say('happy', `${what}…<span class="muted small">The first load can take up to a minute while the server wakes up.</span>`, 'rolling');
 const fmtDay = (d) => new Date(`${d}T00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
@@ -352,7 +401,8 @@ const NAV = [
 ];
 $('#tabs').innerHTML = NAV.map(([v, i, long, short]) => `<a href="#${v}" data-view="${v}">${icon(i)}<span class="l-long">${long}</span><span class="l-short">${short}</span>${v === 'bookings' ? '<i id="nav-badge" class="nav-badge" hidden></i>' : ''}</a>`).join('');
 $('#logo').innerHTML = tyre('happy');
-$('#foot').innerHTML = `${icon('lock', 'xs')} Photos never leave your devices and the AI runs on your own laptop. Phone numbers are shared only after a booking is accepted. · <a href="https://github.com/Raga-V/idlewheels" target="_blank" rel="noopener">Source on GitHub</a>`;
+$('#foot').innerHTML = `${icon('lock', 'xs')} Handover photos never leave your devices and the AI runs on your own laptop. Phone numbers are shared only after a booking is accepted. · Demo photos from <a href="https://github.com/Raga-V/idlewheels/blob/main/CREDITS.md" target="_blank" rel="noopener">Wikimedia Commons</a> · <a href="https://github.com/Raga-V/idlewheels" target="_blank" rel="noopener">Source on GitHub</a>`;
+renderAccount();
 let current;
 function render() {
   clearInterval(poll); poll = null;
@@ -374,19 +424,22 @@ const step = (n, ic, tone, title, text) => `
 
 function listingCard(l) {
   const mine = me && l.owner_id === me.id;
+  const photo = photoSrc(l.photo_url);
   return `
   <article class="listing">
-    <div class="veh-tile">${icon(VEH_ICON[l.type] || 'scooter')}</div>
-    <div class="grow">
-      <h3>${esc(l.vehicle)}</h3>
-      <p class="muted small">${icon('pin', 'xs')} ${esc(l.area || 'Nearby')} · by ${mine ? 'you' : esc(l.owner)}</p>
-      <div class="listing-foot">
-        <span class="tag">${icon('clock', 'xs')} Free ${esc(l.from)}–${esc(l.to)}</span>
-        <span class="price">₹${esc(l.price)}<small>/hr</small></span>
-      </div>
-      ${mine ? '' : `<button class="btn sm wide" data-req="${l.id}">${icon('calendar')} Request to rent</button>`}
+    <div class="l-photo">
+      ${photo ? `<img src="${esc(photo)}" alt="${esc(l.vehicle)}" loading="lazy">` : `<div class="l-ph">${icon(VEH_ICON[l.type] || 'scooter')}</div>`}
+      ${l.demo ? '<span class="demo-tag">Demo</span>' : ''}
+      <span class="price-tag">₹${esc(l.price)}<small>/hr</small></span>
+      ${mine ? `<button class="icon-btn on-photo" data-del="${l.id}" title="Remove listing" aria-label="Remove ${esc(l.vehicle)}">${icon('trash')}</button>` : ''}
     </div>
-    ${mine ? `<button class="icon-btn" data-del="${l.id}" title="Remove listing" aria-label="Remove ${esc(l.vehicle)}">${icon('trash')}</button>` : ''}
+    <div class="l-body">
+      <div class="l-title"><span class="veh-ic">${icon(VEH_ICON[l.type] || 'scooter')}</span><h3>${esc(l.vehicle)}</h3></div>
+      <p class="muted small">${icon('pin', 'xs')} ${esc(l.area || 'Nearby')} · by ${mine ? 'you' : esc(l.owner)}</p>
+      <span class="tag">${icon('clock', 'xs')} Free ${esc(l.from)}–${esc(l.to)}</span>
+      ${mine ? `<p class="muted small yours">Your listing. Requests show up in <a href="#bookings">Bookings</a>.</p>`
+        : `<button class="btn sm wide" data-req="${l.id}">${icon('calendar')} Request to rent</button>`}
+    </div>
   </article>`;
 }
 
@@ -483,6 +536,9 @@ views.rent = () => {
       <div class="field"><span class="lbl">What are you renting out?</span>
         <div class="seg" id="type">${Object.keys(VEH_ICON).map((t) => `<button type="button" data-t="${t}" class="${t === draftType ? 'on' : ''}">${icon(VEH_ICON[t])}<span>${t}</span></button>`).join('')}</div>
       </div>
+      <div class="field"><span class="lbl">Photo <span class="muted">(optional, but renters trust listings with a photo)</span></span>
+        <label class="photo-pick" id="ppick">${listingPhoto ? `<img src="${listingPhoto}" alt="Your vehicle">` : `<span class="slot-empty">${icon('camera')}<span>Add a photo of your vehicle</span></span>`}<input type="file" accept="image/*" id="pfile"></label>
+      </div>
       <div class="grid2">
         <div class="field"><label for="v">Vehicle</label><input id="v" placeholder="Honda Activa 6G" maxlength="60"></div>
         <div class="field"><label for="a">Area</label><input id="a" placeholder="Bachupally" maxlength="60"></div>
@@ -503,11 +559,17 @@ views.rent = () => {
     main.querySelectorAll('#type button').forEach((x) => x.classList.toggle('on', x === b));
   }));
   const g = (id) => $(id).value.trim();
+  $('#pfile').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try { listingPhoto = await downscale(f, 900); } catch { toast("Couldn't read that photo. Try a JPEG or PNG.", 'worried'); return; }
+    $('#ppick').querySelector('img, .slot-empty').outerHTML = `<img src="${listingPhoto}" alt="Your vehicle">`;
+  };
   $('#add').onclick = async () => {
     if (!g('#v')) return $('#v').focus();
     try {
       if (!(await ensureMe())) return;
-      await api('/listings', { method: 'POST', body: { vehicle: g('#v'), type: draftType, area: g('#a'), from: g('#f'), to: g('#u'), price: Number(g('#p')) } });
+      await api('/listings', { method: 'POST', body: { vehicle: g('#v'), type: draftType, area: g('#a'), from: g('#f'), to: g('#u'), price: Number(g('#p')), photo: listingPhoto } });
+      listingPhoto = null;
       toast('Your vehicle is listed!', 'joy');
       location.hash = 'home';
     } catch (e) { toast(e.message, 'worried'); }
@@ -542,7 +604,7 @@ function statusChip(b) {
 
 const bookingCard = (b) => `
   <a class="booking ${b.role === 'owner' && b.status === 'pending' ? 'needs' : ''}" href="#booking/${b.id}">
-    <div class="veh-tile sm">${icon(VEH_ICON[b.type] || 'scooter')}</div>
+    ${b.photo_url ? `<img class="bk-thumb" src="${esc(photoSrc(b.photo_url))}" alt="">` : `<div class="veh-tile sm">${icon(VEH_ICON[b.type] || 'scooter')}</div>`}
     <div class="grow">
       <div class="bk-top"><h3>${esc(b.vehicle)}</h3>${statusChip(b)}</div>
       <p class="muted small">${icon('calendar', 'xs')} ${fmtDay(b.day)} · ${esc(b.from)}–${esc(b.to)} · ₹${esc(b.cost)} · ${b.role === 'owner' ? 'renter' : 'owner'} ${esc(b.other.name)}</p>
@@ -581,7 +643,7 @@ function reportPill(r) {
   return `<div class="report-pill v-${esc(r.verdict)}">${tyre(mood, 'sm')}
     <div class="grow"><span class="eyebrow">AI handover report${r.by ? ` · run by ${esc(r.by)}` : ''}</span>
       <b class="rp-title">${esc(r.title)}</b>
-      <span class="muted small">${(r.angles || []).map((a) => esc(a.angle)).join(', ')} checked by ${esc(r.model || 'Gemma')}</span>
+      <span class="muted small">${(r.angles || []).map((a) => esc(a.angle)).join(', ')} checked by ${esc(r.model || 'Gemma')}${r.sample ? ' · sample photos' : ''}</span>
       ${dmg.length ? `<ul class="dmg">${dmg.join('')}</ul>` : ''}</div></div>`;
 }
 
@@ -609,15 +671,17 @@ function bookingHead(b) {
   if (b.status === 'accepted') acts.push(`<a class="btn" href="#check/${b.id}">${icon('shield')} Start handover check</a>`);
   if (owner && b.status === 'accepted') acts.push(act('completed', 'Mark as returned', 'ghost', 'check'));
   if (!owner && (b.status === 'pending' || b.status === 'accepted')) acts.push(act('cancelled', b.status === 'pending' ? 'Cancel request' : 'Cancel booking', 'ghost'));
-  const contact = o.phone
+  const contact = o.demo
+    ? `<span class="muted small">${icon('help', 'xs')} ${name} is a demo owner, so there's no real phone number. Real owners can be called or messaged on WhatsApp once they accept.</span>`
+    : o.phone
     ? `<a class="btn ghost sm" href="tel:${esc(o.phone)}">${icon('phone')} Call ${name}</a>
        <a class="btn ghost sm" href="https://wa.me/${esc(o.phone.replace(/\D/g, ''))}" target="_blank" rel="noopener">${icon('chat')} WhatsApp</a>`
     : `<span class="muted small">${icon('lock', 'xs')} Phone numbers are shared after the owner accepts</span>`;
   return `
     <section class="card bk-card">
       <div class="bk-title">
-        <div class="veh-tile">${icon(VEH_ICON[b.type] || 'scooter')}</div>
-        <div class="grow"><span class="eyebrow">${owner ? 'Request for your vehicle' : 'Your rental'}</span><h1>${veh}</h1></div>
+        ${b.photo_url ? `<img class="bk-photo" src="${esc(photoSrc(b.photo_url))}" alt="">` : `<div class="veh-tile">${icon(VEH_ICON[b.type] || 'scooter')}</div>`}
+        <div class="grow"><span class="eyebrow">${owner ? 'Request for your vehicle' : o.demo ? 'Your rental · demo owner' : 'Your rental'}</span><h1>${veh}</h1></div>
         ${statusChip(b)}
       </div>
       <dl class="facts">
@@ -726,6 +790,12 @@ function drawCheck() {
     ${b ? `<a class="for-booking" href="#booking/${b.id}">${icon('chat')}<span>For the booking with <b>${esc(b.other.name)}</b> · ${fmtDay(b.day)}, ${esc(b.from)}–${esc(b.to)}. The report will be posted in your chat.</span>${icon('arrow', 'xs')}</a>` : ''}
     <ol class="stepper">${stepLi(1, 'Pickup photos')}${stepLi(2, 'Return photos')}${stepLi(3, 'AI report')}</ol>
     ${guide ? say('happy', guide) : ''}
+    ${!nb && !na ? `<section class="card sample noprint">
+      <img src="demo/check/after-right.jpg" alt="" class="sample-img">
+      <div class="grow"><h3>No vehicle handy?</h3>
+        <p class="muted small">Load sample photos of a Honda Activa: 4 at pickup and 4 at return. One side came back with a strip of tape and a scratch. See if Gemma finds it.</p></div>
+      <button class="btn soft" id="sample">${icon('camera')} Use sample photos</button>
+    </section>` : ''}
     <section class="card veh-row">
       <label for="veh">${icon('scooter')} Vehicle</label>
       <input id="veh" value="${esc(b?.vehicle || checkVeh)}" placeholder="Honda Activa 6G" maxlength="60" ${b ? 'readonly' : ''}>
@@ -746,10 +816,27 @@ function drawCheck() {
   $('#veh').onchange = () => { checkVeh = $('#veh').value.trim(); save('iw-veh', checkVeh); };
   main.querySelectorAll('input[type=file]').forEach((inp) => (inp.onchange = async () => {
     const f = inp.files[0]; if (!f) return;
-    shots[inp.dataset.phase][inp.dataset.angle] = await downscale(f);
+    try { shots[inp.dataset.phase][inp.dataset.angle] = await downscale(f); }
+    catch { toast("Couldn't read that photo. Try a JPEG or PNG.", 'worried'); return; }
     keepShots(); results = null; drawCheck();
   }));
   $('#reset').onclick = () => { shots = { before: {}, after: {} }; keepShots(); results = null; drawCheck(); };
+  $('#sample')?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    const file = { Front: 'front', 'Left side': 'left', 'Right side': 'right', Rear: 'rear' };
+    try {
+      for (const a of ANGLES) {
+        for (const phase of ['before', 'after']) {
+          const r = await fetch(`demo/check/${phase}-${file[a]}.jpg`);
+          if (!r.ok) throw new Error(`Couldn't load the sample photos (${r.status})`);
+          shots[phase][a] = await downscale(await r.blob());
+        }
+      }
+      shots.sample = true;
+      if (!checkBooking) { checkVeh = 'Honda Activa (sample photos)'; save('iw-veh', checkVeh); }
+      keepShots(); results = null; drawCheck();
+    } catch (err) { toast(err.message, 'worried'); e.target.disabled = false; }
+  });
   $('#print')?.addEventListener('click', () => window.print());
   $('#run').onclick = async () => {
     const prog = $('#prog');
@@ -775,7 +862,7 @@ async function shareReport(r) {
     await api(`/bookings/${checkBooking.id}/report`, {
       method: 'POST',
       body: {
-        verdict, title, model: settings.model,
+        verdict, title, model: settings.model, sample: !!shots.sample,
         angles: r.angles.map((a) => ({ angle: a.angle, verdict: a.error ? 'error' : a.verdict, damage: a.new_damage || [] })),
       },
     });
@@ -803,6 +890,7 @@ function report(r) {
       <div><span class="eyebrow">Handover report · ${esc(r.vehicle)}</span><h2>${title}</h2><p>${sub}</p></div>
     </div>
     <p class="muted small meta">${r.at.toLocaleString()} · checked by ${esc(settings.model)} running on this laptop${r.shared && checkBooking ? ` · <a href="#booking/${checkBooking.id}">posted in your chat with ${esc(checkBooking.other.name)}</a>` : ''}</p>
+    ${shots.sample ? `<p class="answer">${icon('help', 'xs')} <span><b>Answer key for the sample photos:</b> only the <b>right side</b> has new damage, a strip of tape and a scratch on the side panel. The other three angles are unchanged retakes with different light. Compare that with what Gemma said above.</span></p>` : ''}
     <div class="results">${r.angles.map((a) => {
       const [bi, bl] = a.error ? ['alert', 'Error'] : BADGE[a.verdict] || BADGE.unsure;
       const conf = Math.round((a.confidence || 0) * 100);
