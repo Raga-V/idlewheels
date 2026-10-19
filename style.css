@@ -1,0 +1,39 @@
+:root{--bg:#f6f3ec;--card:#fff;--ink:#1d1b18;--muted:#6f6a60;--line:#e4ded2;--brand:#e8590c;--brand2:#fff1e6;--ok:#2b8a3e;--okbg:#ebfbee;--bad:#c92a2a;--badbg:#fff5f5;--warn:#e67700;--warnbg:#fff9db}
+@media (prefers-color-scheme:dark){:root{--bg:#161412;--card:#211e1b;--ink:#f1ece4;--muted:#a59e93;--line:#38332d;--brand2:#3a2414;--okbg:#14301c;--badbg:#3a1717;--warnbg:#3a2e10}}
+*{box-sizing:border-box}body{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+.top{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;max-width:880px;margin:auto}
+.brand{font-size:22px}.pill{font-size:13px;padding:4px 10px;border-radius:99px;background:var(--line)}
+.pill.ok{background:var(--okbg);color:var(--ok)}.pill.bad{background:var(--badbg);color:var(--bad)}
+.tabs{display:flex;gap:6px;padding:0 16px;max-width:880px;margin:auto;overflow-x:auto}
+.tabs button{border:1px solid var(--line);background:var(--card);color:var(--ink);padding:8px 14px;border-radius:99px;font:inherit;cursor:pointer;white-space:nowrap}
+.tabs button.active{background:var(--brand);border-color:var(--brand);color:#fff}
+main{max-width:880px;margin:auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+h1{font-size:26px;margin:4px 0 6px}h2{font-size:19px;margin:0 0 8px}.muted{color:var(--muted)}.small{font-size:13px}
+.hero{background:var(--brand2);border:none}
+.btn{border:0;background:var(--brand);color:#fff;padding:11px 18px;border-radius:12px;font:inherit;font-weight:600;cursor:pointer}
+.btn:disabled{opacity:.45;cursor:not-allowed}.btn.ghost{background:transparent;color:var(--brand);border:1px solid var(--brand)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+label{display:block;margin:8px 0 4px;font-weight:600;font-size:14px}
+input,select{width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.slot{border:2px dashed var(--line);border-radius:14px;padding:10px;text-align:center}
+.slot img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:10px;display:block}
+.slot .ph{aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;border-radius:10px;background:var(--bg);color:var(--muted);font-size:34px}
+.slot b{display:block;margin:6px 0}.slot input{display:none}.slot .pick{font-size:13px;color:var(--brand);cursor:pointer;font-weight:600}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}.pair img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:10px}
+.cap{font-size:12px;color:var(--muted);text-align:center}
+.verdict{padding:12px 14px;border-radius:12px;font-weight:700;margin:10px 0}
+.verdict.ok{background:var(--okbg);color:var(--ok)}.verdict.bad{background:var(--badbg);color:var(--bad)}.verdict.unsure{background:var(--warnbg);color:var(--warn)}
+ul.dmg{margin:6px 0 0;padding-left:20px}.sev{font-size:12px;font-weight:700;padding:1px 7px;border-radius:99px;background:var(--line);margin-left:6px}
+.sev.major{background:var(--badbg);color:var(--bad)}.sev.moderate{background:var(--warnbg);color:var(--warn)}
+.listing{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.listing .price{font-size:20px;font-weight:800;color:var(--brand)}
+.steps{display:flex;gap:8px;margin:10px 0}.steps span{flex:1;text-align:center;padding:6px;border-radius:10px;background:var(--line);font-size:13px;font-weight:600}
+.steps span.on{background:var(--brand);color:#fff}
+.spin{display:inline-block;width:16px;height:16px;border:3px solid var(--line);border-top-color:var(--brand);border-radius:50%;animation:s 1s linear infinite;vertical-align:-3px;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+.report{border:2px solid var(--ink)}
+code{background:var(--bg);padding:2px 6px;border-radius:6px;font-size:14px}
+.foot{max-width:880px;margin:auto;padding:8px 16px 40px;font-size:13px;color:var(--muted)}
+@media print{.tabs,.top,.foot,.noprint{display:none!important}body{background:#fff}}

@@ -1,0 +1,8 @@
+# Render Blueprint: New → Blueprint → pick this repo.
+# Plain static site, no build step.
+services:
+  - type: web
+    name: idlewheels
+    runtime: static
+    buildCommand: echo "no build step"
+    staticPublishPath: .
