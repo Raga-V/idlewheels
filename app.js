@@ -2,6 +2,8 @@
 // Listings, bookings and chat live on the IdleWheels server (server.js).
 // Photos and the AI never leave this browser and the Ollama server it points at (the owner's laptop).
 
+import { findChange } from './diff.js';
+
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
@@ -110,67 +112,65 @@ async function aiStatus() {
   return aiReady;
 }
 
-// Order matters: Ollama fills JSON fields in schema order, so the model describes
-// each photo BEFORE it is allowed to decide what changed.
-const SCHEMA = {
+// How the check works, after testing on real photos:
+// asked to compare two whole photos, Gemma 3 4B either invented scratches on unchanged sides or missed tape
+// entirely, depending on the wording. So code finds WHERE the photos differ (diff.js: line them up, even out
+// the light, compare), and Gemma only describes that one close-up. Unchanged angles never reach the AI.
+// Order matters: Ollama fills JSON fields in schema order, so the model describes both close-ups first.
+const SPOT_SCHEMA = {
   type: 'object',
   properties: {
-    before_description: { type: 'string' },
-    after_description: { type: 'string' },
-    same_vehicle_and_angle: { type: 'boolean' },
-    new_damage: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          part: { type: 'string' },
-          kind: { type: 'string', enum: ['scratch', 'dent', 'crack', 'mark or sticker', 'missing part', 'broken part', 'other'] },
-          description: { type: 'string' },
-          severity: { type: 'string', enum: ['minor', 'moderate', 'major'] },
-        },
-        required: ['part', 'kind', 'description', 'severity'],
-      },
-    },
-    verdict: { type: 'string', enum: ['no_new_damage', 'new_damage', 'unsure'] },
-    confidence: { type: 'number' },
+    pickup_closeup: { type: 'string' },
+    return_closeup: { type: 'string' },
+    differences: { type: 'array', items: { type: 'string' } },
+    new_damage: { type: 'boolean' },
+    kind: { type: 'string', enum: ['tape or sticker', 'scratch', 'dent', 'crack', 'missing or broken part', 'other mark', 'none'] },
+    part: { type: 'string' },
+    description: { type: 'string' },
+    severity: { type: 'string', enum: ['minor', 'moderate', 'major'] },
   },
-  required: ['before_description', 'after_description', 'same_vehicle_and_angle', 'new_damage', 'verdict', 'confidence'],
+  required: ['pickup_closeup', 'return_closeup', 'differences', 'new_damage', 'kind', 'part', 'description', 'severity'],
 };
 
-function prompt(angle, vehicle) {
-  return `You are a careful vehicle inspector settling a rental handover between a vehicle owner and a renter.
-Image 1 is the BEFORE photo, taken when the owner handed over the ${vehicle || 'vehicle'}.
-Image 2 is the AFTER photo of the same ${angle.toLowerCase()} view, taken when the renter returned it.
-
-1. Describe the visible condition in image 1 (body panels, scratches, dents, marks, mirrors, lights).
-2. Describe the visible condition in image 2 the same way.
-3. List ONLY damage that is visible in image 2 and NOT in image 1: new scratches, dents, cracks, marks, stickers or tape, missing or broken parts.
-
-Rules:
-- Ignore differences in lighting, shadows, reflections, camera angle, zoom and background.
-- Ignore dust or water unless it hides a part.
-- Do not invent damage. If you cannot tell, use verdict "unsure" and a low confidence.
-- If the two photos do not show the same vehicle from roughly the same angle, set same_vehicle_and_angle to false and verdict "unsure".
-- confidence is a number from 0 to 1.`;
-}
+const spotPrompt = (angle, vehicle) => `You are checking a rental handover of a ${vehicle || 'vehicle'}. Both images are close-ups of the SAME spot on its ${angle.toLowerCase()}.
+Image 1: at pickup. Image 2: at return. The photos were compared and this is the spot that changed the most.
+1. pickup_closeup: describe the vehicle surface in image 1 in one sentence, mentioning any tape, stickers, scratches or dents.
+2. return_closeup: describe the same surface in image 2 the same way.
+3. differences: list things ON THE VEHICLE that are in image 2 but not in image 1. Leave it empty if the vehicle looks the same. Differences in light, shadow, reflections or the background do not count.
+4. new_damage: true if differences lists tape, a sticker, a scratch, a dent, a crack, a mark or a missing or broken part.
+5. kind, part, description, severity: about the most important item in differences ("none" if empty).`;
 
 async function checkAngle(angle, vehicle) {
-  const strip = (d) => d.split(',')[1];
-  const body = {
-    model: settings.model,
-    stream: false,
-    format: SCHEMA,
-    options: { temperature: 0.1, num_ctx: 4096 },
-    messages: [{ role: 'user', content: prompt(angle, vehicle), images: [strip(shots.before[angle]), strip(shots.after[angle])] }],
-  };
   const t0 = performance.now();
-  const r = await fetch(`${settings.url}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`Ollama said ${r.status}: ${await r.text()}`);
-  const data = await r.json();
-  const out = JSON.parse(data.message.content);
-  out.seconds = Math.round((performance.now() - t0) / 100) / 10;
-  if (out.verdict === 'no_new_damage' && out.new_damage?.length) out.verdict = 'new_damage';
-  return out;
+  const done = (out) => ({ ...out, seconds: Math.round((performance.now() - t0) / 100) / 10 });
+  const change = await findChange(shots.before[angle], shots.after[angle]);
+  if (change.misaligned) return done({ verdict: 'unsure', method: 'pixels', change, new_damage: [], same_vehicle_and_angle: false });
+  if (!change.region) return done({ verdict: 'no_new_damage', method: 'pixels', change, new_damage: [] });
+
+  const strip = (d) => d.split(',')[1];
+  let ai;
+  try {
+    const r = await fetch(`${settings.url}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: settings.model, stream: false, format: SPOT_SCHEMA, options: { temperature: 0.1, num_ctx: 4096 },
+        messages: [{ role: 'user', content: spotPrompt(angle, vehicle), images: [strip(change.crops.before), strip(change.crops.after)] }],
+      }),
+    });
+    if (!r.ok) throw new Error(`Ollama said ${r.status}: ${await r.text()}`);
+    ai = JSON.parse((await r.json()).message.content);
+  } catch (e) {
+    // No AI available: the changed spot is still outlined for people to judge.
+    return done({ verdict: 'unsure', method: 'pixels', change, new_damage: [], aiError: e.message });
+  }
+  const found = ai.new_damage && ai.kind !== 'none';
+  return done({
+    // Something on the photo changed for sure; Gemma says whether it looks like damage. People confirm from the close-ups.
+    verdict: found ? 'new_damage' : 'unsure',
+    method: 'ai', change, ai,
+    new_damage: found ? [{ part: ai.part, kind: ai.kind, description: ai.description, severity: ai.severity }] : [],
+  });
 }
 
 // Gemma only decides which price class the vehicle belongs to; the rupees come from real market rates.
@@ -840,7 +840,8 @@ function drawCheck() {
   $('#print')?.addEventListener('click', () => window.print());
   $('#run').onclick = async () => {
     const prog = $('#prog');
-    if (!(await aiStatus())) { prog.innerHTML = say('sleepy', `I can't reach Gemma on this laptop. Open <a href="#setup">AI setup</a> to wake me up.`); return; }
+    // The photo comparison runs without the AI; Gemma is only needed to describe a changed spot.
+    aiStatus();
     const veh = $('#veh').value.trim(); const res = { vehicle: veh, at: new Date(), angles: [] };
     $('#run').disabled = true;
     for (const [i, a] of ready.entries()) {
@@ -872,15 +873,15 @@ async function shareReport(r) {
 }
 
 function overall(r) {
-  if (r.angles.some((a) => a.verdict === 'new_damage')) return ['bad', 'worried', 'New damage found', 'Go over the marked spots together before you settle the deposit.'];
-  if (r.angles.some((a) => a.verdict === 'unsure')) return ['unsure', 'unsure', 'Some angles need a closer look', "Gemma wasn't sure about some photos. Check those spots together, or retake them."];
+  if (r.angles.some((a) => a.verdict === 'new_damage')) return ['bad', 'worried', 'New damage found', 'Look at the outlined spot and the close-ups together before you settle the deposit.'];
+  if (r.angles.some((a) => a.verdict === 'unsure')) return ['unsure', 'unsure', 'Some angles need a closer look', "Something changed, but it may only be light or the background, or the photos didn't line up. Check together, or retake."];
   return ['ok', 'joy', 'No new damage', 'Everything matches the pickup photos. Hand back the deposit.'];
 }
 
 const BADGE = {
   new_damage: ['alert', 'New damage'],
   no_new_damage: ['check', 'Looks the same'],
-  unsure: ['help', 'Unsure'],
+  unsure: ['help', 'Look closer'],
 };
 
 function report(r) {
@@ -889,23 +890,28 @@ function report(r) {
     <div class="verdict v-${cls}">${tyre(mood, 'md')}
       <div><span class="eyebrow">Handover report · ${esc(r.vehicle)}</span><h2>${title}</h2><p>${sub}</p></div>
     </div>
-    <p class="muted small meta">${r.at.toLocaleString()} · checked by ${esc(settings.model)} running on this laptop${r.shared && checkBooking ? ` · <a href="#booking/${checkBooking.id}">posted in your chat with ${esc(checkBooking.other.name)}</a>` : ''}</p>
-    ${shots.sample ? `<p class="answer">${icon('help', 'xs')} <span><b>Answer key for the sample photos:</b> only the <b>right side</b> has new damage, a strip of tape and a scratch on the side panel. The other three angles are unchanged retakes with different light. Compare that with what Gemma said above.</span></p>` : ''}
+    <p class="muted small meta">${r.at.toLocaleString()} · photos compared on this device, changed spots described by ${esc(settings.model)} on this laptop${r.shared && checkBooking ? ` · <a href="#booking/${checkBooking.id}">posted in your chat with ${esc(checkBooking.other.name)}</a>` : ''}</p>
+    ${shots.sample ? `<p class="answer">${icon('help', 'xs')} <span><b>Answer key for the sample photos:</b> only the <b>right side</b> has new damage, a strip of tape and a scratch on the side panel. The other three angles are unchanged retakes with slightly different framing and light. Compare that with the report above.</span></p>` : ''}
     <div class="results">${r.angles.map((a) => {
       const [bi, bl] = a.error ? ['alert', 'Error'] : BADGE[a.verdict] || BADGE.unsure;
-      const conf = Math.round((a.confidence || 0) * 100);
       return `<article class="res">
         <header><h3>${esc(a.angle)}</h3><span class="badge b-${a.error ? 'unsure' : esc(a.verdict)}">${icon(bi, 'xs')} ${bl}</span></header>
         <div class="pair">
           <figure><img src="${shots.before[a.angle]}" alt=""><figcaption>Pickup</figcaption></figure>
-          <figure><img src="${shots.after[a.angle]}" alt=""><figcaption>Return</figcaption></figure>
+          <figure><img src="${a.change?.marked || shots.after[a.angle]}" alt=""><figcaption>Return${a.change?.region ? ' · changed spot outlined' : ''}</figcaption></figure>
         </div>
+        ${a.change?.crops ? `<div class="closeups"><span class="lbl">Close-up of the changed spot</span><div class="pair">
+          <figure><img src="${a.change.crops.before}" alt=""><figcaption>Pickup</figcaption></figure>
+          <figure><img src="${a.change.crops.after}" alt=""><figcaption>Return</figcaption></figure></div></div>` : ''}
         ${a.error ? `<p class="warn">${esc(a.error)}</p>` : ''}
         ${a.same_vehicle_and_angle === false ? `<p class="warn">These two photos don't look like the same view. Retake the return photo.</p>` : ''}
         ${a.new_damage?.length
           ? `<ul class="dmg">${a.new_damage.map((d) => `<li><span><b>${esc(d.part)}</b> · ${esc(d.kind)}<br><span class="muted small">${esc(d.description)}</span></span><span class="sev ${esc(d.severity)}">${esc(d.severity)}</span></li>`).join('')}</ul>`
-          : a.error ? '' : `<p class="muted small">Nothing new spotted.</p>`}
-        ${a.error ? '' : `<div class="conf"><span>Confidence</span><div class="meter"><i style="width:${conf}%"></i></div><b>${conf}%</b><span class="muted">· ${esc(a.seconds)}s</span></div>`}
+          : a.error || a.same_vehicle_and_angle === false ? ''
+          : a.aiError ? `<p class="warn">Something changed at the outlined spot, but Gemma isn't reachable to describe it. Look at the close-up together, or open <a href="#setup">AI setup</a>.</p>`
+          : a.method === 'ai' ? `<p class="muted small">The photos differ here, but Gemma thinks the vehicle itself looks the same${a.ai?.return_closeup ? `: <i>${esc(a.ai.return_closeup)}</i>` : ''}. Have a look at the close-up.</p>`
+          : `<p class="muted small">Nothing changed on the vehicle. The photos line up and match after evening out the light.</p>`}
+        ${a.error ? '' : `<p class="how-checked">${icon(a.method === 'ai' ? 'sparkle' : 'check', 'xs')} ${a.method === 'ai' ? `Spot found by comparing photos, described by ${esc(settings.model)}` : 'Pixel comparison only, no AI needed'} · ${esc(a.seconds)}s</p>`}
       </article>`;
     }).join('')}</div>
     <div class="row noprint"><button class="btn" id="print">${icon('printer')} Save report as PDF</button>

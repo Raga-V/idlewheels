@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 20
       - name: Syntax-check the app and server
-        run: node --check app.js && node --check server.js
+        run: node --check app.js && node --check diff.js && node --check server.js
       - name: Test the server (list, request, accept, chat, report)
         run: npm ci && npm test
       - name: Make sure every file the page loads exists

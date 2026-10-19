@@ -345,6 +345,11 @@ dialog.sheet h2{font-size:26px}
 .answer{display:flex;gap:8px;align-items:flex-start;margin:0 0 16px;padding:12px 14px;border-radius:14px;background:var(--lilac-soft);font-size:14px}
 .answer .ic{margin-top:3px;color:var(--lilac)}
 
+.closeups{display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:14px;background:var(--rose-soft)}
+.closeups .lbl{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--rose)}
+.closeups .pair img{aspect-ratio:auto;max-height:220px;object-fit:contain;background:var(--surface)}
+.how-checked{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+
 /* ---------- phone ---------- */
 @media (max-width:760px){
   :root{--navh:84px}
