@@ -1,43 +1,56 @@
-# 🛵 IdleWheels
+# IdleWheels
 
-**Your bike is idle 9 hours a day. Rent it to someone who isn't, and let a local AI settle "that scratch was already there."**
+**Your scooter naps 9 hours a day. Let it earn.**
 
-College students and IT folks in India park their scooters, bikes and cars at 9 and don't touch them until 6. IdleWheels lets owners list those idle hours. The hard part of peer-to-peer rental isn't booking, it's trust, so the core of IdleWheels is an **AI handover check**:
+College students and office-goers in India park their scooters, bikes and cars at 9 and don't touch them until 6. IdleWheels lets neighbours rent each other's vehicles for exactly those idle hours. Booking is the easy part. The hard part of peer-to-peer rental is trust, so the core of IdleWheels is an **AI handover check** that runs on an open model on the owner's own laptop.
 
-1. At handover, the owner takes 4 photos (front, left, right, rear).
-2. At return, the renter takes the same 4.
-3. **Gemma 3** (open-weight, running on the owner's own laptop through Ollama) compares each pair and lists only the *new* damage, with a verdict and confidence.
-4. Both people save the report as a PDF. That's the whole dispute process.
+Live: https://idlewheels.onrender.com (also https://raga-v.github.io/idlewheels/)
 
-When listing a vehicle, **✨ Ask Gemma for a fair price** suggests an hourly rate and a range, with a short reason.
+## How it works
 
-Live app: https://raga-v.github.io/idlewheels/ (the AI part needs Ollama on your laptop, see below)
+1. **List the idle hours.** The owner says when the vehicle is free. Gemma sorts the vehicle into a price class (a Splendor is budget, a Royal Enfield is premium) and the app suggests a fair hourly price from real Hyderabad rental rates.
+2. **Request and chat.** A neighbour picks a day and hours and sees the total cost. The owner accepts or declines. Once accepted, both get each other's phone number (call or WhatsApp) and a chat inside the booking to plan the pickup.
+3. **Snap 4 photos at pickup** (front, left, right, rear), and the same 4 at return.
+4. **Gemma 3 compares each pair** and lists only the *new* damage, with a verdict and confidence. The report is posted into the booking chat, and both people can save it as a PDF. That's the whole dispute process.
+
+## Privacy by design
+
+- **Photos never leave the device.** They're downscaled in the browser and sent only to Ollama on the owner's laptop (`localhost`). The server only ever sees the text verdict.
+- **Phone numbers stay hidden** until the owner accepts a booking.
+- No passwords: the first time you list or request, you give a name and phone number, and your browser keeps a private key.
 
 ## Run the AI locally
 
 ```bash
 ollama pull gemma3:4b
-# Windows:  setx OLLAMA_ORIGINS "*"   then restart Ollama from the tray
-#   (safer: list only the sites you use, e.g. "https://raga-v.github.io,https://idlewheels.onrender.com")
-# Mac/Linux: OLLAMA_ORIGINS="*" ollama serve
+# Windows:  setx OLLAMA_ORIGINS "https://idlewheels.onrender.com,https://raga-v.github.io"   then restart Ollama from the tray
+# Mac/Linux: OLLAMA_ORIGINS="https://idlewheels.onrender.com,https://raga-v.github.io" ollama serve
 ```
 
-Open the live app on the same laptop. Chrome may ask to let the site access devices on your local network: click **Allow**. (Or run it fully offline: `python -m http.server 8000` in this folder and open http://localhost:8000.) The pill at the top turns green when Gemma is reachable. Photos go only from your browser to `localhost`.
+Open the app on the same laptop. If Chrome asks to let the site access devices on your local network, click **Allow**. The pill at the top turns green when Gemma is reachable.
 
-## How it works
+## Run the whole app locally
 
-- Plain HTML/CSS/JS, no build step, no backend. Listings are stored in your browser.
-- Photos are downscaled to 768 px in the browser, then sent with both images in one request to Ollama's `/api/chat`, with a JSON schema.
-- The schema makes the model **describe each photo first**, then decide what changed. Ollama fills fields in schema order, so the verdict is grounded in what it just described. It is also told to ignore lighting, angle and reflections, and to answer "unsure" rather than invent damage.
-- GitHub Actions syntax-checks the app and deploys it to GitHub Pages on every push (`.github/workflows/deploy.yml`).
+```bash
+npm install
+npm start          # http://localhost:8000, with an in-memory Postgres (PGlite), so no database setup
+npm test           # end-to-end server test: list, request, accept, chat, report
+```
 
-## Why open models
+Set `DATABASE_URL` to use a real Postgres.
 
-Vehicle photos contain number plates, homes and faces. With an open-weight model on the owner's laptop, they never touch a third-party server, every check costs ₹0, and you can swap in `gemma3:12b` for sharper eyes.
+## How it's built
+
+- **Frontend:** plain HTML/CSS/JS with no build step. Tyro, the tyre mascot, and all the icons are inline SVG.
+- **Server:** `server.js`, a dependency-light Node server (only `pg`) that serves the app and a small JSON API for users, listings, bookings, messages and reports. It runs on Render with Render Postgres (`render.yaml`).
+- **Damage check:** both photos go in one request to Ollama's `/api/chat` with a JSON schema. The schema makes the model **describe each photo first**, then decide what changed. Ollama fills fields in schema order, so the verdict is grounded in what it just described. It is told to ignore lighting, angle and reflections, and to answer "unsure" rather than invent damage.
+- **Price tip:** a 4B model asked for rupee amounts swung between ₹95, ₹180 and ₹600/hr for similar vehicles. So Gemma only picks the class, and the rupees come from real local rates set a little below commercial rentals.
+- **CI:** GitHub Actions syntax-checks the app, runs the server test, and deploys the static copy to GitHub Pages.
 
 ## Honest limits
 
-- A 4B vision model misses tiny scratches and can be fooled by glare. Treat the report as a second pair of eyes, not a judge.
+- A 4B vision model misses tiny scratches and can be fooled by glare. Treat the report as a second pair of eyes, not a judge. Swap in `gemma3:12b` for sharper eyes.
+- Identity is a name, a phone number and a browser key. There is no OTP check.
 - Renting out a private (white-plate) vehicle for money needs commercial registration and insurance in India. This is a demo of the trust layer, not a legal rental service.
 
 Built for the DEV Hacktoberfest Open-Source AI Challenge, Week 2: Side Hustle. Idea by my dad.

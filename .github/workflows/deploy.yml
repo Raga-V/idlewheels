@@ -22,8 +22,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Syntax-check the app
-        run: node --check app.js
+      - name: Syntax-check the app and server
+        run: node --check app.js && node --check server.js
+      - name: Test the server (list, request, accept, chat, report)
+        run: npm ci && npm test
       - name: Make sure every file the page loads exists
         run: |
           for f in style.css app.js; do test -f "$f" || { echo "missing $f"; exit 1; }; done

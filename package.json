@@ -1,0 +1,20 @@
+{
+  "name": "idlewheels",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rent out your idle bike or car. A local Gemma checks every handover for new damage.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test/flow.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17"
+  }
+}

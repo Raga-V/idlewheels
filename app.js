@@ -1,5 +1,6 @@
-// IdleWheels: rent out your idle vehicle; a local Gemma checks every handover for new damage.
-// No backend. Listings live in this browser; photos go only to the Ollama server you point it at (your laptop).
+// IdleWheels: neighbours rent each other's idle vehicles; a local Gemma checks every handover for new damage.
+// Listings, bookings and chat live on the IdleWheels server (server.js).
+// Photos and the AI never leave this browser and the Ollama server it points at (the owner's laptop).
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -14,16 +15,20 @@ const HINTS = {
   Rear: 'Tail light and number plate in frame',
 };
 let settings = { url: 'http://localhost:11434', model: 'gemma3:4b', ...load('iw-settings', {}) };
-let listings = load('iw-listings', [
-  { id: 'demo1', owner: 'Dad', vehicle: 'Honda Activa 6G', type: 'Scooter', area: 'Bachupally', from: '09:30', to: '17:30', price: 40 },
-]);
-// angle -> dataURL (downscaled). Kept in the browser so a reload between pickup and return loses nothing.
-const shots = load('iw-shots', { before: {}, after: {} });
-const keepShots = () => save('iw-shots', shots);
+// The GitHub Pages copy has no server of its own, so it talks to the one on Render.
+const API = location.hostname.endsWith('github.io') ? 'https://idlewheels.onrender.com' : '';
+let me = load('iw-me', null);        // { id, name, phone, key } once this browser has introduced itself
+let listings = [];
+// angle -> dataURL (downscaled), one set per booking. Kept in the browser so a reload between pickup and return loses nothing.
+let shotsKey = 'iw-shots-free';
+let shots = { before: {}, after: {} };
+const keepShots = () => save(shotsKey, shots);
 let results = null;
 let aiReady = false;
-let checkVeh = listings[0]?.vehicle || '';
+let checkBooking = null;
+let checkVeh = load('iw-veh', '');
 let draftType = 'Scooter';
+let poll = null;
 
 // ------------------------------------------------------------------ icons + Tyro the tyre
 
@@ -47,6 +52,13 @@ const ICONS = {
   scooter: '<circle cx="6" cy="17" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="M8.5 17H14l2.5-6.5L15 5h-2.5"/><path d="M3.5 13H10l2 4"/>',
   bike: '<circle cx="5.5" cy="16.5" r="3"/><circle cx="18.5" cy="16.5" r="3"/><path d="M5.5 16.5 9 10h5l4.5 6.5"/><path d="M14 10l-1.5-4H15"/><path d="M8 10h4"/>',
   car: '<path d="M5 17H3v-4.5l2.2-5A2 2 0 0 1 7 6h10a2 2 0 0 1 1.8 1.5l2.2 5V17h-2"/><path d="M9 17h6"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/><path d="M4 12h16"/>',
+  chat: '<path d="M4 5h16v11H10l-5 4v-4H4z"/><path d="M8 9.5h8M8 12.5h5"/>',
+  send: '<path d="M4 12 20 4l-5 16-3.5-6.5z"/><path d="m11.5 13.5 3-3"/>',
+  phone: '<path d="M6 3.5h3.5l1.5 4.5-2.2 1.5a11 11 0 0 0 5.7 5.7l1.5-2.2 4.5 1.5V18a2 2 0 0 1-2 2A15.5 15.5 0 0 1 4 6a2 2 0 0 1 2-2.5z"/>',
+  back: '<path d="M19 12H5"/><path d="m11 6-6 6 6 6"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 20.5c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/>',
 };
 const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]}</svg>`;
 const VEH_ICON = { Scooter: 'scooter', Bike: 'bike', Car: 'car' };
@@ -261,19 +273,94 @@ function downscale(file, max = 768) {
   });
 }
 
+// ------------------------------------------------------------------ server, dialogs, toasts
+
+async function api(path, { method = 'GET', body } = {}) {
+  const r = await fetch(`${API}/api${path}`, {
+    method,
+    headers: { 'content-type': 'application/json', ...(me ? { 'x-user-key': me.key } : {}) },
+    body: body && JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && me) { me = null; save('iw-me', null); }
+  if (!r.ok) throw new Error(data.error || `The server said ${r.status}`);
+  return data;
+}
+
+// A modal form. Resolves with the form's fields, or null if closed.
+function sheet(inner, submit, setup) {
+  return new Promise((resolve) => {
+    const d = document.createElement('dialog');
+    d.className = 'sheet';
+    d.innerHTML = `<form method="dialog">${inner}
+      <div class="row end"><button class="btn ghost" value="cancel" formnovalidate>Cancel</button><button class="btn" value="ok">${submit}</button></div></form>`;
+    document.body.append(d);
+    d.addEventListener('close', () => {
+      const data = d.returnValue === 'ok' ? Object.fromEntries(new FormData(d.querySelector('form'))) : null;
+      d.remove();
+      resolve(data);
+    });
+    setup?.(d);
+    d.showModal();
+  });
+}
+
+function toast(msg, mood = 'happy') {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.innerHTML = `${tyre(mood, 'xs')}<span>${esc(msg)}</span>`;
+  document.body.append(t);
+  setTimeout(() => t.classList.add('out'), 3200);
+  setTimeout(() => t.remove(), 3700);
+}
+
+async function ensureMe() {
+  if (me) return me;
+  const f = await sheet(`
+    <span class="eyebrow">${icon('user')} Quick intro</span>
+    <h2>Hi! Who are you?</h2>
+    <p class="muted small">Your name is shown on your listings and requests. Your phone number is only shared with the other person after a booking is accepted.</p>
+    <div class="field"><label for="nm">Your name</label><input id="nm" name="name" required maxlength="40" placeholder="Raga" autocomplete="given-name"></div>
+    <div class="field"><label for="ph">Phone</label><input id="ph" name="phone" required inputmode="tel" pattern="[+0-9 ]{10,16}" placeholder="98765 43210" autocomplete="tel"></div>`, 'Continue');
+  if (!f) return null;
+  me = await api('/users', { method: 'POST', body: f });
+  save('iw-me', me);
+  return me;
+}
+
+const waking = (what) => say('happy', `${what}…<span class="muted small">The first load can take up to a minute while the server wakes up.</span>`, 'rolling');
+const fmtDay = (d) => new Date(`${d}T00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+const isoDay = (d) => d.toLocaleDateString('en-CA');
+
+async function refreshBadge(list) {
+  if (!me) return;
+  try {
+    list ??= await api('/bookings');
+    const n = list.filter((b) => b.role === 'owner' && b.status === 'pending').length;
+    const dot = $('#nav-badge');
+    dot.hidden = !n; dot.textContent = n;
+  } catch {}
+}
+
 // ------------------------------------------------------------------ routing
 
 const views = {};
 const main = $('#main');
-const NAV = [['home', 'home', 'Home'], ['rent', 'plus', 'List vehicle'], ['check', 'shield', 'Damage check'], ['setup', 'laptop', 'AI setup']];
-$('#tabs').innerHTML = NAV.map(([v, i, t]) => `<a href="#${v}" data-view="${v}">${icon(i)}<span>${t}</span></a>`).join('');
+const NAV = [
+  ['home', 'home', 'Home', 'Home'], ['rent', 'plus', 'List vehicle', 'List'], ['bookings', 'chat', 'Bookings', 'Bookings'],
+  ['check', 'shield', 'Damage check', 'Check'], ['setup', 'laptop', 'AI setup', 'AI'],
+];
+$('#tabs').innerHTML = NAV.map(([v, i, long, short]) => `<a href="#${v}" data-view="${v}">${icon(i)}<span class="l-long">${long}</span><span class="l-short">${short}</span>${v === 'bookings' ? '<i id="nav-badge" class="nav-badge" hidden></i>' : ''}</a>`).join('');
 $('#logo').innerHTML = tyre('happy');
-$('#foot').innerHTML = `${icon('lock', 'xs')} Photos never leave your devices. The AI runs on Gemma, an open-weight model, on your own laptop. · <a href="https://github.com/Raga-V/idlewheels" target="_blank" rel="noopener">Source on GitHub</a>`;
+$('#foot').innerHTML = `${icon('lock', 'xs')} Photos never leave your devices and the AI runs on your own laptop. Phone numbers are shared only after a booking is accepted. · <a href="https://github.com/Raga-V/idlewheels" target="_blank" rel="noopener">Source on GitHub</a>`;
 let current;
 function render() {
-  current = views[location.hash.slice(1)] ? location.hash.slice(1) : 'home';
-  document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('on', a.dataset.view === current));
-  views[current]();
+  clearInterval(poll); poll = null;
+  const [name, arg] = location.hash.slice(1).split('/');
+  current = views[name] ? name : 'home';
+  const tab = current === 'booking' ? 'bookings' : current;
+  document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('on', a.dataset.view === tab));
+  Promise.resolve(views[current](arg)).catch((e) => toast(e.message, 'worried'));
 }
 window.addEventListener('hashchange', () => { render(); scrollTo(0, 0); });
 
@@ -285,19 +372,65 @@ const step = (n, ic, tone, title, text) => `
     <h3>${title}</h3><p class="muted">${text}</p>
   </article>`;
 
-const listingCard = (l) => `
+function listingCard(l) {
+  const mine = me && l.owner_id === me.id;
+  return `
   <article class="listing">
     <div class="veh-tile">${icon(VEH_ICON[l.type] || 'scooter')}</div>
     <div class="grow">
       <h3>${esc(l.vehicle)}</h3>
-      <p class="muted small">${icon('pin', 'xs')} ${esc(l.area || 'Nearby')} · by ${esc(l.owner)}</p>
+      <p class="muted small">${icon('pin', 'xs')} ${esc(l.area || 'Nearby')} · by ${mine ? 'you' : esc(l.owner)}</p>
       <div class="listing-foot">
         <span class="tag">${icon('clock', 'xs')} Free ${esc(l.from)}–${esc(l.to)}</span>
         <span class="price">₹${esc(l.price)}<small>/hr</small></span>
       </div>
+      ${mine ? '' : `<button class="btn sm wide" data-req="${l.id}">${icon('calendar')} Request to rent</button>`}
     </div>
-    <button class="icon-btn" data-del="${esc(l.id)}" title="Remove listing" aria-label="Remove ${esc(l.vehicle)}">${icon('trash')}</button>
+    ${mine ? `<button class="icon-btn" data-del="${l.id}" title="Remove listing" aria-label="Remove ${esc(l.vehicle)}">${icon('trash')}</button>` : ''}
   </article>`;
+}
+
+async function fillListings() {
+  const box = $('#lst');
+  try { listings = await api('/listings'); }
+  catch (e) { if (box.isConnected) box.innerHTML = say('worried', `Couldn't load vehicles: ${esc(e.message)}`); return; }
+  if (!box.isConnected) return;
+  box.innerHTML = `<div class="listings">
+    ${listings.map(listingCard).join('')}
+    <a class="listing add" href="#rent">${icon('plus')}<span>${listings.length ? 'List your vehicle' : 'No vehicles yet. List the first one!'}</span></a>
+  </div>`;
+  box.querySelectorAll('[data-req]').forEach((b) => (b.onclick = () => requestListing(listings.find((l) => l.id === Number(b.dataset.req))).catch((e) => toast(e.message, 'worried'))));
+  box.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Remove this listing? Existing bookings stay in your Bookings tab.')) return;
+    try { await api(`/listings/${b.dataset.del}`, { method: 'DELETE' }); fillListings(); } catch (e) { toast(e.message, 'worried'); }
+  }));
+}
+
+async function requestListing(l) {
+  if (!(await ensureMe())) return;
+  const tomorrow = new Date(Date.now() + 864e5);
+  const f = await sheet(`
+    <span class="eyebrow">${icon(VEH_ICON[l.type] || 'scooter')} Request to rent</span>
+    <h2>${esc(l.vehicle)}</h2>
+    <p class="muted small">${esc(l.owner)} · ${esc(l.area || 'Nearby')} · ₹${esc(l.price)}/hr · free ${esc(l.from)}–${esc(l.to)}</p>
+    <div class="field"><label for="rq-day">Day</label><input id="rq-day" type="date" name="day" required min="${isoDay(new Date())}" value="${isoDay(tomorrow)}"></div>
+    <div class="field two">
+      <div><label for="rq-from">From</label><input id="rq-from" type="time" name="from" required value="${esc(l.from)}" min="${esc(l.from)}" max="${esc(l.to)}"></div>
+      <div><label for="rq-to">Until</label><input id="rq-to" type="time" name="to" required value="${esc(l.to)}" min="${esc(l.from)}" max="${esc(l.to)}"></div>
+    </div>
+    <div class="field"><label for="rq-note">Message to ${esc(l.owner)} <span class="muted">(optional)</span></label><input id="rq-note" name="note" maxlength="300" placeholder="Need it to get to college and back"></div>
+    <p class="est" id="est"></p>`, `${icon('send')} Send request`, (d) => {
+    const upd = () => {
+      const h = hoursBetween(d.querySelector('[name=from]').value || l.from, d.querySelector('[name=to]').value || l.to);
+      d.querySelector('#est').innerHTML = `${h} hours × ₹${esc(l.price)} = <b>₹${esc(Math.round(h * l.price))}</b> <span class="muted small">· pay the owner directly at pickup</span>`;
+    };
+    d.addEventListener('input', upd); upd();
+  });
+  if (!f) return;
+  const b = await api('/bookings', { method: 'POST', body: { listing_id: l.id, ...f } });
+  toast(`Request sent to ${l.owner}!`, 'joy');
+  location.hash = `booking/${b.id}`;
+}
 
 views.home = () => {
   main.innerHTML = `
@@ -305,10 +438,10 @@ views.home = () => {
       <div class="hero-copy">
         <span class="eyebrow">${icon('clock')} Rent out the hours you don't ride</span>
         <h1>Your scooter naps 9 hours a day. <em>Let it earn.</em></h1>
-        <p class="lead">IdleWheels lets you rent your bike or car to someone nearby while you're at work or in class. When it comes back, a local AI compares photos and points out only the new scratches. No arguments, no cloud.</p>
+        <p class="lead">Neighbours rent each other's bikes and cars for the hours they sit parked. Request a slot, chat about pickup, and at every return a local AI compares photos and points out only the new scratches.</p>
         <div class="row">
-          <a class="btn" href="#rent">${icon('plus')} List my vehicle</a>
-          <a class="btn ghost" href="#check">${icon('shield')} Try the damage check</a>
+          <button class="btn" id="find">${icon('search')} Find a vehicle</button>
+          <a class="btn ghost" href="#rent">${icon('plus')} List my vehicle</a>
         </div>
       </div>
       <div class="hero-art">
@@ -322,23 +455,19 @@ views.home = () => {
     <section class="section">
       <h2 class="h2">How it works</h2>
       <div class="how">
-        ${step(1, 'clock', 'lilac', 'List the idle hours', 'Say when your vehicle is free, like 9:30 to 5:30. Gemma suggests a fair hourly price.')}
-        ${step(2, 'camera', 'sun', 'Snap 4 photos at pickup', 'Front, left, right and rear. The renter snaps the same 4 when they bring it back.')}
-        ${step(3, 'shield', 'mint', 'AI checks for new damage', 'Gemma on your own laptop compares each pair and lists only what is new. Both of you keep the PDF.')}
+        ${step(1, 'clock', 'lilac', 'List the idle hours', 'Say when your vehicle is free. Gemma suggests a fair hourly price from real local rates.')}
+        ${step(2, 'chat', 'brand', 'Request and chat', 'A neighbour picks a day and hours. Accept, and you both get each other\'s number and a chat to plan the pickup.')}
+        ${step(3, 'camera', 'sun', 'Snap 4 photos at pickup', 'Front, left, right and rear. The renter snaps the same 4 when they bring it back.')}
+        ${step(4, 'shield', 'mint', 'AI checks for new damage', 'Gemma on the owner\'s laptop lists only what is new. The report lands in your booking chat.')}
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" id="near">
       <div class="sec-head"><h2 class="h2">Idle near you</h2><a href="#rent" class="link">List yours ${icon('arrow', 'xs')}</a></div>
-      <div class="listings">
-        ${listings.map(listingCard).join('')}
-        <a class="listing add" href="#rent">${icon('plus')}<span>Your vehicle here</span></a>
-      </div>
+      <div id="lst">${waking('Finding idle vehicles')}</div>
     </section>`;
-  main.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => {
-    listings = listings.filter((l) => l.id !== b.dataset.del);
-    save('iw-listings', listings); views.home();
-  }));
+  $('#find').onclick = () => $('#near').scrollIntoView({ behavior: 'smooth' });
+  fillListings();
 };
 
 // ------------------------------------------------------------------ list a vehicle
@@ -348,40 +477,40 @@ views.rent = () => {
     <header class="page-head">
       <span class="eyebrow">${icon('plus')} Rent out</span>
       <h1>List your idle vehicle</h1>
-      <p class="lead">Tell people nearby when it's free and what it costs. Takes a minute.</p>
+      <p class="lead">Tell people nearby when it's free and what it costs. Requests show up in your Bookings tab.</p>
     </header>
     <section class="card form">
       <div class="field"><span class="lbl">What are you renting out?</span>
         <div class="seg" id="type">${Object.keys(VEH_ICON).map((t) => `<button type="button" data-t="${t}" class="${t === draftType ? 'on' : ''}">${icon(VEH_ICON[t])}<span>${t}</span></button>`).join('')}</div>
       </div>
       <div class="grid2">
-        <div class="field"><label for="v">Vehicle</label><input id="v" placeholder="Honda Activa 6G"></div>
-        <div class="field"><label for="o">Your name</label><input id="o" placeholder="Raga"></div>
-        <div class="field"><label for="a">Area</label><input id="a" placeholder="Bachupally"></div>
-        <div class="field two">
-          <div><label for="f">Free from</label><input id="f" type="time" value="09:30"></div>
-          <div><label for="u">Until</label><input id="u" type="time" value="17:30"></div>
-        </div>
+        <div class="field"><label for="v">Vehicle</label><input id="v" placeholder="Honda Activa 6G" maxlength="60"></div>
+        <div class="field"><label for="a">Area</label><input id="a" placeholder="Bachupally" maxlength="60"></div>
+        <div class="field"><label for="f">Free from</label><input id="f" type="time" value="09:30"></div>
+        <div class="field"><label for="u">Until</label><input id="u" type="time" value="17:30"></div>
       </div>
       <div class="price-box">
-        <div class="field"><label for="p">Price per hour</label><div class="prefix"><span>₹</span><input id="p" type="number" min="0" value="40"></div></div>
+        <div class="field"><label for="p">Price per hour</label><div class="prefix"><span>₹</span><input id="p" type="number" min="1" max="5000" value="35"></div></div>
         <button type="button" class="btn soft" id="ask">${icon('sparkle')} Ask Gemma for a fair price</button>
       </div>
       <div id="sugg"></div>
-      <div class="row end"><button class="btn" id="add">${icon('check')} Add listing</button></div>
+      <div class="row end">${me ? `<span class="muted small">Listing as ${esc(me.name)}</span>` : ''}<button class="btn" id="add">${icon('check')} Add listing</button></div>
     </section>
-    <p class="note">${icon('help', 'xs')} <span>This is a demo. Listings are saved in this browser only. A real launch needs commercial (rental) registration and insurance; private-plate vehicles can't legally be rented out for money in India.</span></p>`;
+    <p class="note">${icon('help', 'xs')} <span>This is a demo. A real launch needs commercial (rental) registration and insurance; private-plate vehicles can't legally be rented out for money in India.</span></p>`;
 
   main.querySelectorAll('#type button').forEach((b) => (b.onclick = () => {
     draftType = b.dataset.t;
     main.querySelectorAll('#type button').forEach((x) => x.classList.toggle('on', x === b));
   }));
   const g = (id) => $(id).value.trim();
-  $('#add').onclick = () => {
+  $('#add').onclick = async () => {
     if (!g('#v')) return $('#v').focus();
-    listings.push({ id: crypto.randomUUID?.() || String(Date.now()), owner: g('#o') || 'Me', vehicle: g('#v'), type: draftType, area: g('#a'), from: g('#f'), to: g('#u'), price: g('#p') });
-    save('iw-listings', listings);
-    location.hash = 'home';
+    try {
+      if (!(await ensureMe())) return;
+      await api('/listings', { method: 'POST', body: { vehicle: g('#v'), type: draftType, area: g('#a'), from: g('#f'), to: g('#u'), price: Number(g('#p')) } });
+      toast('Your vehicle is listed!', 'joy');
+      location.hash = 'home';
+    } catch (e) { toast(e.message, 'worried'); }
   };
   $('#ask').onclick = async () => {
     if (!g('#v')) return $('#v').focus();
@@ -393,10 +522,163 @@ views.rent = () => {
       const s = await suggestPrice({ vehicle: g('#v'), type: draftType, area: g('#a'), from: g('#f'), to: g('#u') });
       $('#p').value = Math.round(s.price_per_hour);
       sugg.innerHTML = say('joy', `<b class="say-big">₹${esc(s.price_per_hour)}/hr feels fair</b>
-        <span class="muted small">Fair range ₹${esc(s.low)}–${esc(s.high)} · full ${esc(s.hours)}-hour window earns ₹${esc(s.price_per_hour * s.hours)} · took ${esc(s.seconds)}s</span>
+        <span class="muted small">Fair range ₹${esc(s.low)}–${esc(s.high)} · full ${esc(s.hours)}-hour window earns ₹${esc(Math.round(s.price_per_hour * s.hours))} · took ${esc(s.seconds)}s</span>
         <p>Gemma rates it <b>${esc(s.tier)}</b>. ${esc(s.reason)} ${esc(s.market)}, so a neighbour's vehicle should sit a little below that.</p>`);
     } catch (e) { sugg.innerHTML = say('worried', esc(e.message)); }
     $('#ask').disabled = false;
+  };
+};
+
+// ------------------------------------------------------------------ bookings
+
+const STATUS = {
+  pending: ['sun', 'Waiting for reply'], accepted: ['mint', 'Confirmed'], declined: ['rose', 'Declined'],
+  cancelled: ['grey', 'Cancelled'], completed: ['lilac', 'Returned'],
+};
+function statusChip(b) {
+  const [tone, label] = STATUS[b.status] || STATUS.pending;
+  return `<span class="st ${tone}">${b.status === 'pending' && b.role === 'owner' ? 'New request' : label}</span>`;
+}
+
+const bookingCard = (b) => `
+  <a class="booking ${b.role === 'owner' && b.status === 'pending' ? 'needs' : ''}" href="#booking/${b.id}">
+    <div class="veh-tile sm">${icon(VEH_ICON[b.type] || 'scooter')}</div>
+    <div class="grow">
+      <div class="bk-top"><h3>${esc(b.vehicle)}</h3>${statusChip(b)}</div>
+      <p class="muted small">${icon('calendar', 'xs')} ${fmtDay(b.day)} · ${esc(b.from)}–${esc(b.to)} · ₹${esc(b.cost)} · ${b.role === 'owner' ? 'renter' : 'owner'} ${esc(b.other.name)}</p>
+      ${b.last_message ? `<p class="small last">${esc(b.last_message)}</p>` : ''}
+    </div>
+    ${icon('arrow')}
+  </a>`;
+
+views.bookings = async () => {
+  main.innerHTML = `
+    <header class="page-head">
+      <span class="eyebrow">${icon('chat')} Bookings</span>
+      <h1>Requests and rentals</h1>
+      <p class="lead">Accept requests for your vehicle, plan pickups in the chat, and keep every handover report in one place.</p>
+    </header>
+    <div id="bk">${me ? waking('Loading your bookings') : say('happy', `Nothing here yet. <a href="#home">Request a vehicle</a> or <a href="#rent">list yours</a> to get started.`)}</div>`;
+  if (!me) return;
+  const box = $('#bk');
+  let list;
+  try { list = await api('/bookings'); } catch (e) { box.innerHTML = say('worried', esc(e.message)); return; }
+  if (!box.isConnected) return;
+  const owner = list.filter((b) => b.role === 'owner'), renter = list.filter((b) => b.role === 'renter');
+  const section = (title, items, empty) => `<section class="bk-sec"><h2 class="h2">${title}</h2>
+    ${items.length ? `<div class="bookings">${items.map(bookingCard).join('')}</div>` : `<p class="muted">${empty}</p>`}</section>`;
+  box.innerHTML =
+    section('Requests for your vehicles', owner, 'No requests yet. <a href="#rent">List a vehicle</a> and they will show up here.') +
+    section('Your rentals', renter, 'You haven\'t requested anything yet. <a href="#home">Find a vehicle</a>.') +
+    `<p class="note">${icon('user', 'xs')} <span>You're <b>${esc(me.name)}</b> (${esc(me.phone)}) on this browser.</span></p>`;
+  refreshBadge(list);
+};
+
+function reportPill(r) {
+  const mood = { ok: 'joy', bad: 'worried', unsure: 'unsure' }[r.verdict] || 'unsure';
+  const dmg = (r.angles || []).flatMap((a) => (a.damage || []).map((d) =>
+    `<li><span><b>${esc(a.angle)}</b> · ${esc(d.part)}<br><span class="muted small">${esc(d.description || d.kind)}</span></span><span class="sev ${esc(d.severity)}">${esc(d.severity)}</span></li>`));
+  return `<div class="report-pill v-${esc(r.verdict)}">${tyre(mood, 'sm')}
+    <div class="grow"><span class="eyebrow">AI handover report${r.by ? ` · run by ${esc(r.by)}` : ''}</span>
+      <b class="rp-title">${esc(r.title)}</b>
+      <span class="muted small">${(r.angles || []).map((a) => esc(a.angle)).join(', ')} checked by ${esc(r.model || 'Gemma')}</span>
+      ${dmg.length ? `<ul class="dmg">${dmg.join('')}</ul>` : ''}</div></div>`;
+}
+
+function message(m) {
+  if (m.kind === 'system') return `<div class="msg sys">${esc(m.body)}</div>`;
+  if (m.kind === 'report') { try { return `<div class="msg-report">${reportPill(JSON.parse(m.body))}</div>`; } catch { return ''; } }
+  const at = new Date(m.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return `<div class="msg ${m.sender_id === me.id ? 'me' : 'them'}"><p>${esc(m.body)}</p><time>${at}</time></div>`;
+}
+
+function bookingHead(b) {
+  const owner = b.role === 'owner', o = b.other, name = esc(o.name), veh = esc(b.vehicle);
+  const guide = {
+    pending: owner ? `<b>${name}</b> wants your ${veh}. Accept to share phone numbers, then plan the pickup in the chat below.`
+      : `Request sent! Waiting for <b>${name}</b> to accept. You can already ask questions in the chat.`,
+    accepted: `Confirmed! At pickup, open the <b>handover check</b> and snap the 4 pickup photos together. Snap the return photos when it comes back.`,
+    declined: owner ? 'You declined this request.' : `${name} can't lend it this time. Try another vehicle on <a href="#home">Home</a>.`,
+    cancelled: 'This booking was cancelled.',
+    completed: 'Returned. Thanks for sharing wheels!',
+  }[b.status];
+  const mood = { pending: 'happy', accepted: 'joy', declined: 'unsure', cancelled: 'sleepy', completed: 'joy' }[b.status];
+  const act = (status, label, cls = '', ic = '') => `<button class="btn ${cls}" data-status="${status}">${ic ? icon(ic) : ''}${label}</button>`;
+  const acts = [];
+  if (owner && b.status === 'pending') acts.push(act('accepted', 'Accept', '', 'check'), act('declined', 'Decline', 'ghost'));
+  if (b.status === 'accepted') acts.push(`<a class="btn" href="#check/${b.id}">${icon('shield')} Start handover check</a>`);
+  if (owner && b.status === 'accepted') acts.push(act('completed', 'Mark as returned', 'ghost', 'check'));
+  if (!owner && (b.status === 'pending' || b.status === 'accepted')) acts.push(act('cancelled', b.status === 'pending' ? 'Cancel request' : 'Cancel booking', 'ghost'));
+  const contact = o.phone
+    ? `<a class="btn ghost sm" href="tel:${esc(o.phone)}">${icon('phone')} Call ${name}</a>
+       <a class="btn ghost sm" href="https://wa.me/${esc(o.phone.replace(/\D/g, ''))}" target="_blank" rel="noopener">${icon('chat')} WhatsApp</a>`
+    : `<span class="muted small">${icon('lock', 'xs')} Phone numbers are shared after the owner accepts</span>`;
+  return `
+    <section class="card bk-card">
+      <div class="bk-title">
+        <div class="veh-tile">${icon(VEH_ICON[b.type] || 'scooter')}</div>
+        <div class="grow"><span class="eyebrow">${owner ? 'Request for your vehicle' : 'Your rental'}</span><h1>${veh}</h1></div>
+        ${statusChip(b)}
+      </div>
+      <dl class="facts">
+        <div><dt>Day</dt><dd>${fmtDay(b.day)}</dd></div>
+        <div><dt>Time</dt><dd>${esc(b.from)}–${esc(b.to)}</dd></div>
+        <div><dt>Cost</dt><dd>₹${esc(b.cost)} <span class="muted small">${esc(b.hours)} h × ₹${esc(b.price)}</span></dd></div>
+        <div><dt>${owner ? 'Renter' : 'Owner'}</dt><dd>${name}</dd></div>
+      </dl>
+      <div class="row contact">${contact}</div>
+      ${b.report ? reportPill(b.report) : ''}
+    </section>
+    ${say(mood, guide)}
+    ${acts.length ? `<div class="row actions">${acts.join('')}</div>` : ''}`;
+}
+
+views.booking = async (id) => {
+  if (!me) { location.hash = 'bookings'; return; }
+  main.innerHTML = `
+    <a class="back" href="#bookings">${icon('back')} All bookings</a>
+    <div id="bk-head">${waking('Opening the booking')}</div>
+    <section class="card chat" id="chat">
+      <h2 class="h3">${icon('chat')} Chat</h2>
+      <div class="msgs" id="msgs"></div>
+      <form id="send" class="send"><input name="body" placeholder="Write a message…" autocomplete="off" maxlength="1000" aria-label="Message"><button class="btn" aria-label="Send">${icon('send')}</button></form>
+    </section>`;
+  let lastId = 0;
+  const head = async () => {
+    const b = await api(`/bookings/${id}`);
+    const box = $('#bk-head');
+    if (!box) return;
+    box.innerHTML = bookingHead(b);
+    $('#send').hidden = b.status === 'declined' || b.status === 'cancelled';
+    box.querySelectorAll('[data-status]').forEach((x) => (x.onclick = async () => {
+      const s = x.dataset.status;
+      if ((s === 'declined' || s === 'cancelled') && !confirm(s === 'declined' ? 'Decline this request?' : 'Cancel this booking?')) return;
+      x.disabled = true;
+      try { await api(`/bookings/${id}/status`, { method: 'POST', body: { status: s } }); await head(); await pull(); refreshBadge(); }
+      catch (e) { toast(e.message, 'worried'); x.disabled = false; }
+    }));
+  };
+  const pull = async (first = false) => {
+    const msgs = await api(`/bookings/${id}/messages?after=${lastId}`);
+    const box = $('#msgs');
+    if (!msgs.length || !box) return;
+    lastId = msgs.at(-1).id;
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    box.insertAdjacentHTML('beforeend', msgs.map(message).join(''));
+    if (first || nearBottom) box.scrollTop = box.scrollHeight;
+    // Status changes and reports arrive as messages; refresh the header when the other person acts.
+    if (!first && msgs.some((m) => m.kind !== 'text')) await head();
+  };
+  try { await head(); await pull(true); }
+  catch (e) { $('#bk-head').innerHTML = say('worried', esc(e.message)); $('#chat').remove(); return; }
+  poll = setInterval(() => pull().catch(() => {}), 4000);
+  $('#send').onsubmit = async (e) => {
+    e.preventDefault();
+    const inp = e.target.elements.body, v = inp.value.trim();
+    if (!v) return;
+    inp.value = '';
+    try { await api(`/bookings/${id}/messages`, { method: 'POST', body: { body: v } }); await pull(); }
+    catch (err) { toast(err.message, 'worried'); inp.value = v; }
   };
 };
 
@@ -411,7 +693,18 @@ function slot(phase, a, label) {
   </label>`;
 }
 
-views.check = () => {
+views.check = async (bookingId) => {
+  const key = `iw-shots-${bookingId || 'free'}`;
+  if (key !== shotsKey) { shotsKey = key; shots = load(key, { before: {}, after: {} }); results = null; }
+  checkBooking = null;
+  if (bookingId && me) {
+    main.innerHTML = waking('Opening the booking');
+    try { checkBooking = await api(`/bookings/${bookingId}`); } catch (e) { toast(e.message, 'worried'); }
+  }
+  drawCheck();
+};
+
+function drawCheck() {
   const nb = ANGLES.filter((a) => shots.before[a]).length;
   const na = ANGLES.filter((a) => shots.after[a]).length;
   const ready = ANGLES.filter((a) => shots.before[a] && shots.after[a]);
@@ -422,6 +715,7 @@ views.check = () => {
     : ready.length < 4 ? `Welcome back! ${ready.length} of 4 pairs ready. Match the pickup angles as closely as you can.`
     : `All 4 pairs ready. Tap <b>Check for new damage</b> and I'll compare them.`;
   const stepLi = (n, label) => `<li class="${at > n || results ? 'done' : at === n ? 'cur' : ''}"><b>${at > n || results ? icon('check', 'xs') : n}</b><span>${label}</span></li>`;
+  const b = checkBooking;
 
   main.innerHTML = `
     <header class="page-head">
@@ -429,11 +723,12 @@ views.check = () => {
       <h1>Settle "that scratch was already there"</h1>
       <p class="lead">Photos at pickup, photos at return. Gemma on your laptop spots what's new.</p>
     </header>
+    ${b ? `<a class="for-booking" href="#booking/${b.id}">${icon('chat')}<span>For the booking with <b>${esc(b.other.name)}</b> · ${fmtDay(b.day)}, ${esc(b.from)}–${esc(b.to)}. The report will be posted in your chat.</span>${icon('arrow', 'xs')}</a>` : ''}
     <ol class="stepper">${stepLi(1, 'Pickup photos')}${stepLi(2, 'Return photos')}${stepLi(3, 'AI report')}</ol>
     ${guide ? say('happy', guide) : ''}
     <section class="card veh-row">
       <label for="veh">${icon('scooter')} Vehicle</label>
-      <select id="veh">${listings.length ? listings.map((l) => `<option ${l.vehicle === checkVeh ? 'selected' : ''}>${esc(l.vehicle)}</option>`).join('') : '<option>My vehicle</option>'}</select>
+      <input id="veh" value="${esc(b?.vehicle || checkVeh)}" placeholder="Honda Activa 6G" maxlength="60" ${b ? 'readonly' : ''}>
     </section>
     <div class="angles">${ANGLES.map((a) => `
       <article class="angle">
@@ -448,28 +743,46 @@ views.check = () => {
     <div id="prog"></div>
     <div id="out">${results ? report(results) : ''}</div>`;
 
-  $('#veh').onchange = () => (checkVeh = $('#veh').value);
+  $('#veh').onchange = () => { checkVeh = $('#veh').value.trim(); save('iw-veh', checkVeh); };
   main.querySelectorAll('input[type=file]').forEach((inp) => (inp.onchange = async () => {
     const f = inp.files[0]; if (!f) return;
     shots[inp.dataset.phase][inp.dataset.angle] = await downscale(f);
-    keepShots(); results = null; views.check();
+    keepShots(); results = null; drawCheck();
   }));
-  $('#reset').onclick = () => { shots.before = {}; shots.after = {}; keepShots(); results = null; views.check(); };
+  $('#reset').onclick = () => { shots = { before: {}, after: {} }; keepShots(); results = null; drawCheck(); };
   $('#print')?.addEventListener('click', () => window.print());
   $('#run').onclick = async () => {
     const prog = $('#prog');
     if (!(await aiStatus())) { prog.innerHTML = say('sleepy', `I can't reach Gemma on this laptop. Open <a href="#setup">AI setup</a> to wake me up.`); return; }
-    const veh = $('#veh').value; const res = { vehicle: veh, at: new Date(), angles: [] };
+    const veh = $('#veh').value.trim(); const res = { vehicle: veh, at: new Date(), angles: [] };
     $('#run').disabled = true;
     for (const [i, a] of ready.entries()) {
       prog.innerHTML = say('happy', `Comparing the <b>${a.toLowerCase()}</b> photos… (${i + 1} of ${ready.length})`, 'rolling');
       try { res.angles.push({ angle: a, ...(await checkAngle(a, veh)) }); }
       catch (e) { res.angles.push({ angle: a, verdict: 'unsure', error: e.message, new_damage: [] }); }
     }
-    results = res; views.check();
+    results = res;
+    if (checkBooking) await shareReport(res);
+    drawCheck();
     $('#out').scrollIntoView({ behavior: 'smooth' });
   };
-};
+}
+
+// Only the verdicts and damage notes go to the booking; the photos stay here.
+async function shareReport(r) {
+  const [verdict, , title] = overall(r);
+  try {
+    await api(`/bookings/${checkBooking.id}/report`, {
+      method: 'POST',
+      body: {
+        verdict, title, model: settings.model,
+        angles: r.angles.map((a) => ({ angle: a.angle, verdict: a.error ? 'error' : a.verdict, damage: a.new_damage || [] })),
+      },
+    });
+    r.shared = true;
+    toast(`Report posted in your chat with ${checkBooking.other.name}`, 'joy');
+  } catch (e) { toast(`Couldn't post the report: ${e.message}`, 'worried'); }
+}
 
 function overall(r) {
   if (r.angles.some((a) => a.verdict === 'new_damage')) return ['bad', 'worried', 'New damage found', 'Go over the marked spots together before you settle the deposit.'];
@@ -489,7 +802,7 @@ function report(r) {
     <div class="verdict v-${cls}">${tyre(mood, 'md')}
       <div><span class="eyebrow">Handover report · ${esc(r.vehicle)}</span><h2>${title}</h2><p>${sub}</p></div>
     </div>
-    <p class="muted small meta">${r.at.toLocaleString()} · checked by ${esc(settings.model)} running on this laptop</p>
+    <p class="muted small meta">${r.at.toLocaleString()} · checked by ${esc(settings.model)} running on this laptop${r.shared && checkBooking ? ` · <a href="#booking/${checkBooking.id}">posted in your chat with ${esc(checkBooking.other.name)}</a>` : ''}</p>
     <div class="results">${r.angles.map((a) => {
       const [bi, bl] = a.error ? ['alert', 'Error'] : BADGE[a.verdict] || BADGE.unsure;
       const conf = Math.round((a.confidence || 0) * 100);
@@ -550,3 +863,5 @@ views.setup = () => {
 
 render();
 aiStatus().then(() => current === 'setup' && views.setup());
+refreshBadge();
+setInterval(() => refreshBadge(), 30000);
