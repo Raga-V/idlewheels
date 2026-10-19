@@ -160,40 +160,87 @@ async function checkAngle(angle, vehicle) {
   return out;
 }
 
-// Same trick as the damage check: reason first, then commit to numbers.
+// Gemma only decides which price class the vehicle belongs to; the rupees come from real market rates.
+// Letting a 4B model do the arithmetic gave ₹95, ₹180 and ₹600/hr for the same kind of vehicle.
 const PRICE_SCHEMA = {
   type: 'object',
   properties: {
-    reasoning: { type: 'string' },
-    low: { type: 'number' },
-    high: { type: 'number' },
-    price_per_hour: { type: 'number' },
+    tier: { type: 'string', enum: ['budget', 'standard', 'premium'] },
+    reason: { type: 'string', maxLength: 220 },
   },
-  required: ['reasoning', 'low', 'high', 'price_per_hour'],
+  required: ['tier', 'reason'],
 };
 
+// Hyderabad self-drive rental rates, checked Oct 2026 (ONN, GoWheelo, Boongg, Rentrip, Royal Brothers, Zoomcar,
+// Revv, Zymo). The per-hour price is set a little below the commercial rate: a neighbour's vehicle comes with
+// no company, no insurance package and no roadside help.
+const TIERS = {
+  Scooter: {
+    market: 'Commercial scooter rentals start around ₹39/hr (₹350–550 per day)',
+    budget: { examples: 'Scooty Pep, Dio, older or 100cc scooters', price: 30 },
+    standard: { examples: 'Activa, Jupiter, Access 125, Fascino', price: 35 },
+    premium: { examples: 'Ntorq, Aerox, Burgman, Ather, Ola, TVS iQube', price: 45 },
+  },
+  Bike: {
+    market: 'Commercial commuter motorcycles rent for ₹29–35/hr; a Royal Enfield Classic 350 costs ₹900–1,500 per day',
+    budget: { examples: 'Splendor, Platina, HF Deluxe, Shine 100', price: 25 },
+    standard: { examples: 'Pulsar 150, Unicorn, FZ, Apache 160, Shine 125', price: 30 },
+    premium: { examples: 'Royal Enfield, KTM Duke, Dominar, any 250cc and up', price: 100 },
+  },
+  Car: {
+    market: 'Self-drive hatchbacks cost ₹45–100/hr on Revv, Zymo and Zoomcar; sedans and SUVs start around ₹95/hr',
+    budget: { examples: 'Alto, Kwid, WagonR, S-Presso', price: 55 },
+    standard: { examples: 'Swift, Baleno, i20, Tiago, Dzire', price: 70 },
+    premium: { examples: 'City, Verna, Creta, Nexon, Brezza, any SUV', price: 95 },
+  },
+};
+
+const hoursBetween = (from, to) => {
+  const m = (t) => { const [h, mm] = t.split(':').map(Number); return h * 60 + mm; };
+  const d = (m(to) - m(from) + 1440) % 1440;
+  return Math.round((d / 60) * 2) / 2;
+};
+const round5 = (n) => Math.max(5, Math.round(n / 5) * 5);
+
 async function suggestPrice(l) {
+  const t = TIERS[l.type] || TIERS.Scooter;
   const body = {
     model: settings.model,
     stream: false,
     format: PRICE_SCHEMA,
-    options: { temperature: 0.2 },
-    messages: [{ role: 'user', content: `You help vehicle owners in India price peer-to-peer hourly rentals.
-Vehicle: ${l.vehicle} (${l.type})
-Area: ${l.area || 'not given'}
-Available: ${l.from} to ${l.to} on weekdays. The renter brings their own fuel.
+    // temperature 0 can loop forever inside JSON mode; a pinch of randomness plus a fixed seed keeps it steady.
+    options: { temperature: 0.1, seed: 7, num_predict: 200 },
+    messages: [{ role: 'user', content: `Put this ${l.type.toLowerCase()} into a rental price class for Hyderabad, India.
+Vehicle: ${l.vehicle}
 
-Suggest a fair price in Indian rupees per hour that a student or office-goer nearby would actually pay.
-Compare with what Rapido, Bounce/Yulu-style scooter rentals, autos and app cabs cost for similar trips.
-Keep it a little cheaper than commercial rentals, since this is a neighbour's vehicle.
-In reasoning, explain in 2-3 short sentences. low and high are a sensible range; price_per_hour is your pick. All whole rupees.` }],
+Classes:
+- budget: ${t.budget.examples}
+- standard: ${t.standard.examples}
+- premium: ${t.premium.examples}
+If the model is unknown or unclear, choose standard.
+In reason, write one short plain sentence saying why, with no quotes.` }],
   };
   const t0 = performance.now();
-  const r = await fetch(`${settings.url}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`Ollama said ${r.status}: ${await r.text()}`);
-  const out = JSON.parse((await r.json()).message.content);
-  out.seconds = Math.round((performance.now() - t0) / 100) / 10;
-  return out;
+  let out;
+  for (let attempt = 1; !out; attempt++) {
+    try {
+      const r = await fetch(`${settings.url}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error(`Ollama said ${r.status}: ${await r.text()}`);
+      const text = (await r.json()).message.content;
+      try { out = JSON.parse(text); }
+      catch { const m = text.match(/"tier"\s*:\s*"(budget|standard|premium)"/); if (!m) throw new Error('Gemma gave an unreadable answer'); out = { tier: m[1], reason: '' }; }
+    } catch (e) {
+      if (attempt >= 2) throw e;
+      body.options.seed++;
+    }
+  }
+  const price = t[out.tier]?.price ?? t.standard.price;
+  const hours = hoursBetween(l.from, l.to);
+  return {
+    tier: out.tier, reason: out.reason, market: t.market, hours,
+    price_per_hour: price, low: round5(price * 0.85), high: round5(price * 1.15),
+    seconds: Math.round((performance.now() - t0) / 100) / 10,
+  };
 }
 
 // ------------------------------------------------------------------ images
@@ -345,10 +392,9 @@ views.rent = () => {
     try {
       const s = await suggestPrice({ vehicle: g('#v'), type: draftType, area: g('#a'), from: g('#f'), to: g('#u') });
       $('#p').value = Math.round(s.price_per_hour);
-      // The model sometimes repeats the numbers at the end of its reasoning; the range line already shows them.
-      const why = s.reasoning.split('\n').filter((l) => !/^\s*(low|high|price)/i.test(l)).join(' ');
-      sugg.innerHTML = say('joy', `<b class="say-big">₹${esc(Math.round(s.price_per_hour))}/hr feels fair</b>
-        <span class="muted small">Fair range ₹${esc(Math.round(s.low))}–${esc(Math.round(s.high))} · took ${esc(s.seconds)}s</span><p>${esc(why)}</p>`);
+      sugg.innerHTML = say('joy', `<b class="say-big">₹${esc(s.price_per_hour)}/hr feels fair</b>
+        <span class="muted small">Fair range ₹${esc(s.low)}–${esc(s.high)} · full ${esc(s.hours)}-hour window earns ₹${esc(s.price_per_hour * s.hours)} · took ${esc(s.seconds)}s</span>
+        <p>Gemma rates it <b>${esc(s.tier)}</b>. ${esc(s.reason)} ${esc(s.market)}, so a neighbour's vehicle should sit a little below that.</p>`);
     } catch (e) { sugg.innerHTML = say('worried', esc(e.message)); }
     $('#ask').disabled = false;
   };
