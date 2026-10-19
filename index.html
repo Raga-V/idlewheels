@@ -2,24 +2,25 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>IdleWheels</title>
-<meta name="description" content="Rent out your idle bike or car during work hours. A local AI checks it for new scratches at every handover.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛵</text></svg>">
+<meta name="description" content="Rent out your bike or car during the hours you don't use it. A local AI checks it for new scratches at every return.">
+<meta name="theme-color" content="#fff8f0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14110f" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="style.css">
 <script type="module" src="app.js"></script>
 </head>
 <body>
 <header class="top">
-  <div class="brand">🛵 <b>IdleWheels</b></div>
-  <span id="ai-status" class="pill">AI: checking…</span>
+  <a class="brand" href="#home" aria-label="IdleWheels home"><span id="logo" class="logo"></span><span>Idle<b>Wheels</b></span></a>
+  <nav class="tabs" id="tabs" aria-label="Main"></nav>
+  <a id="ai-status" class="status" href="#setup"><i class="dot"></i><span>AI: checking…</span></a>
 </header>
-<nav class="tabs">
-  <button data-view="check" class="active">🔍 Handover check</button>
-  <button data-view="listings">🅿️ Idle vehicles</button>
-  <button data-view="settings">⚙️ Setup</button>
-</nav>
 <main id="main"></main>
-<footer class="foot">Photos never leave your device. The damage check runs on an open-weight model (Gemma) on your own laptop.</footer>
+<footer class="foot" id="foot"></footer>
 </body>
 </html>
